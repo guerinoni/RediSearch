@@ -7,4 +7,4 @@ includes = ["redismodule.h", "hiredis/sds.h"]
 
 [parse]
 parse_deps = true
-include = ["value", "sds_rs"]
+include = ["value", "sds_rs" ]

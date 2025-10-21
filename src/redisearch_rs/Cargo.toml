@@ -110,9 +110,8 @@ version = "0.72"
 default-features = false
 
 [workspace.dependencies.redis-module]
-# Patched version. See https://github.com/RedisLabsModules/redismodule-rs/pull/413
-git = "https://github.com/hdoordt/redismodule-rs.git"
-branch = "patches-redisearch"
+git = "https://github.com/RedisLabsModules/redismodule-rs.git"
+rev = "1ab84014c096dbfd431de0e34d174d15f16c0e42"
 default-features = false
 
 [profile.release]

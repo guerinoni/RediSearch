@@ -8,25 +8,77 @@
 */
 
 #![allow(non_camel_case_types, non_snake_case)]
-#![allow(unused)] // TODO removedd
+
+trait Expectable<T> {
+    fn expect(self, msg: &str) -> T;
+
+    unsafe fn unwrap_unchecked(self) -> T;
+}
+
+impl<T> Expectable<T> for Option<T> {
+    fn expect(self, msg: &str) -> T {
+        self.expect(msg)
+    }
+
+    unsafe fn unwrap_unchecked(self) -> T {
+        unsafe { self.unwrap_unchecked() }
+    }
+}
+
+impl<T, E: std::fmt::Debug> Expectable<T> for Result<T, E> {
+    fn expect(self, msg: &str) -> T {
+        self.expect(msg)
+    }
+
+    unsafe fn unwrap_unchecked(self) -> T {
+        unsafe { self.unwrap_unchecked() }
+    }
+}
+
+macro_rules! debug_unwrap {
+    ($opt:expr) => {{
+        // Validate that $opt is an `Option<NonNull<_>>`.
+        // If not, the debug message wouldn't make sense,
+        // in which case a custom message should be provided.
+        let opt = $opt as Option<std::ptr::NonNull<_>>;
+        debug_unwrap!(opt, concat!(stringify!($opt), " must not be NULL"))
+    }};
+    ($opt:expr, $msg:expr) => {{
+        // Have the macro expand to a call to an unsafe function,
+        // forcing the user to put the macro invocation inside an
+        // unsafe block, even in debug mode.
+        #[inline(always)]
+        unsafe fn do_unwrap<T, E: $crate::Expectable<T>>(opt: E, msg: &str) -> T {
+            #[cfg(debug_assertions)]
+            {
+                opt.expect(msg)
+            }
+            #[cfg(not(debug_assertions))]
+            unsafe {
+                opt.unwrap_unchecked()
+            }
+        }
+        do_unwrap($opt, $msg)
+    }};
+}
 
 use std::{
     ffi::{c_char, c_double},
     ptr::NonNull,
 };
 
-use value::{RsValue, map::RsValueMap, shared::SharedRsValue};
+use value::{RsValue, Value, strings::RsValueString};
 
 use crate::value_type::{AsRsValueType, RsValueType};
 
-pub mod map;
+pub mod collection;
 pub mod shared;
 pub mod value_type;
 
 /// Creates a stack-allocated, undefined `RsValue`.
 /// @returns a stack-allocated `RsValue` of type `RsValueType_Undef`
 #[unsafe(no_mangle)]
-pub const extern "C" fn RsValue_Undefined() -> RsValue {
+pub extern "C" fn RsValue_Undefined() -> RsValue {
     RsValue::undefined()
 }
 
@@ -35,7 +87,7 @@ pub const extern "C" fn RsValue_Undefined() -> RsValue {
 /// @param n The numeric value to wrap
 /// @return A stack-allocated `RsValue` of type `RsValueType_Number`
 #[unsafe(no_mangle)]
-pub const extern "C" fn RsValue_Number(n: c_double) -> RsValue {
+pub extern "C" fn RsValue_Number(n: c_double) -> RsValue {
     RsValue::number(n)
 }
 
@@ -46,13 +98,20 @@ pub const extern "C" fn RsValue_Number(n: c_double) -> RsValue {
 /// - The passed string pointer must point to a valid C string that
 ///   was allocated using `rm_malloc`
 /// - The passed length must match the length to the string.
+/// - The passed string pointer must not be aliased.
 ///
 /// @param str The malloc'd string to wrap (ownership is transferred)
 /// @param len The length of the string
 /// @return A stack-allocated `RsValue` of type `RsValueType_String` with `RSString_Malloc` subtype
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn RsValue_String(str: Option<NonNull<c_char>>, len: u32) -> RsValue {
-    todo!()
+    let str = unsafe { debug_unwrap!(str) };
+    // unsafe { RsValue::rm_allocated_string(str, len) }
+    let s = unsafe { RsValueString::copy_from_c_chars(str.as_ptr(), len) };
+
+    let s = unsafe { debug_unwrap!(s, "error creating RsValueString") };
+
+    RsValue::string(s)
 }
 
 /// Returns a pointer to a statically allocated NULL `RsValue`.
@@ -61,7 +120,7 @@ pub unsafe extern "C" fn RsValue_String(str: Option<NonNull<c_char>>, len: u32) 
 /// @return A pointer to a static `RsValue` of type `RsValueType_Null`
 #[unsafe(no_mangle)]
 pub extern "C" fn RsValue_NullStatic() -> &'static RsValue {
-    static RSVALUE_NULL: RsValue = RsValue::null();
+    static RSVALUE_NULL: RsValue = RsValue::null_const();
     &RSVALUE_NULL
 }
 

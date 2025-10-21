@@ -184,3 +184,4 @@ impl RSValueTrait for RSValueFFI {
         std::mem::size_of::<ffi::RSValue>()
     }
 }
+

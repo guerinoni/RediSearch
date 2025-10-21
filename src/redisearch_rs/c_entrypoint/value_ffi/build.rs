@@ -10,5 +10,5 @@
 use build_utils::run_cbinden;
 
 fn main() {
-    run_cbinden("../../headers/value.h").unwrap();
+    run_cbinden("../../headers/value_rs.h").unwrap();
 }

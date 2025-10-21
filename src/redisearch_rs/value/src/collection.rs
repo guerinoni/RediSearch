@@ -24,14 +24,14 @@ use crate::SharedRsValue;
 ///   addition, we must ensure we don't overflow `isize::MAX`.
 ///   See [`NonNull::add`].
 #[repr(C)]
-pub struct RsValueMap {
+pub struct RsValueCollection<T> {
     /// Pointer to a heap-allocated array of `Self::cap` [`RsValueMapEntry`] items.
-    entries: NonNull<RsValueMapEntry>,
+    entries: NonNull<T>,
     /// The number of [`RsValueMapEntry`] items this map can hold
     cap: u32,
 }
 
-impl RsValueMap {
+impl<T> RsValueCollection<T> {
     /// The maximum number of `RsValueMapEntry` items this map can
     /// hold on this platform. Calculated as the minimum of
     /// `u32::MAX` and `isize::MAX / RsValueMapEntry::SIZE`.
@@ -68,7 +68,7 @@ impl RsValueMap {
         // Safety: the size of `layout` is always greater than 0
         // as we return early if `cap` equals 0.
         let ptr = unsafe { alloc(layout) };
-        let entries = NonNull::new(ptr as *mut RsValueMapEntry).unwrap();
+        let entries = NonNull::new(ptr as *mut T).unwrap();
         Self { entries, cap }
     }
 
@@ -80,7 +80,7 @@ impl RsValueMap {
     ///
     /// # Safety
     /// 1.`i` must be less than the map's capacity.
-    pub unsafe fn write_entry(&mut self, entry: RsValueMapEntry, i: u32) {
+    pub unsafe fn write_entry(&mut self, entry: T, i: u32) {
         debug_assert!(i < self.cap, "Index was out of bounds");
         // Safety:
         // - The caller must ensure that `i` is smaller the map's
@@ -101,9 +101,7 @@ impl RsValueMap {
     ///
     /// # Panics
     /// Panics if `iter.len()` exceeds `isize::MAX / RsValueMapEntry::SIZE`.
-    pub fn collect_from_exact_size_iterator<I: ExactSizeIterator<Item = RsValueMapEntry>>(
-        iter: I,
-    ) -> Self {
+    pub fn collect_from_exact_size_iterator<I: ExactSizeIterator<Item = T>>(iter: I) -> Self {
         let len = iter.len();
         assert!(
             len <= Self::MAX_CAPACITY,
@@ -130,9 +128,10 @@ impl RsValueMap {
     ///
     /// # Panics
     /// Panics if `iter.len()` exceeds `isize::MAX / RsValueMapEntry::SIZE`.
-    pub fn clone_from_exact_size_iterator<'m, I: ExactSizeIterator<Item = &'m RsValueMapEntry>>(
-        iter: I,
-    ) -> Self {
+    pub fn clone_from_exact_size_iterator<'m, I: ExactSizeIterator<Item = &'m T>>(iter: I) -> Self
+    where
+        T: Clone + 'static,
+    {
         let len = iter.len();
         assert!(
             len <= Self::MAX_CAPACITY,
@@ -154,7 +153,7 @@ impl RsValueMap {
     }
 
     /// Create a non-consuming iterator over the map's entries.
-    pub const fn iter(&self) -> Iter<'_> {
+    pub const fn iter(&self) -> Iter<'_, T> {
         Iter { map: self, i: 0 }
     }
 
@@ -168,24 +167,13 @@ impl RsValueMap {
     }
 }
 
-impl fmt::Debug for RsValueMap {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut map_fmt = f.debug_map();
-        for e in self.iter() {
-            map_fmt.key(&e.key);
-            map_fmt.value(&e.value);
-        }
-        map_fmt.finish()
-    }
-}
-
-impl Clone for RsValueMap {
+impl<T: Clone + 'static> Clone for RsValueCollection<T> {
     fn clone(&self) -> Self {
         Self::clone_from_exact_size_iterator(self.iter())
     }
 }
 
-impl Drop for RsValueMap {
+impl<T> Drop for RsValueCollection<T> {
     fn drop(&mut self) {
         if self.cap == 0 {
             // No allocation associated with this map,
@@ -228,19 +216,19 @@ impl Drop for RsValueMap {
 
 /// Safety:
 /// [`RsValueMap`] is safe to send to other threads.
-unsafe impl Send for RsValueMap {}
+unsafe impl<T: Send> Send for RsValueCollection<T> {}
 
 /// Safety:
 /// [`&RsValueMap`](RsValueMap) is safe to send to other threads.
-unsafe impl Sync for RsValueMap {}
+unsafe impl<T: Sync> Sync for RsValueCollection<T> {}
 
-pub struct Iter<'m> {
-    map: &'m RsValueMap,
+pub struct Iter<'m, T> {
+    map: &'m RsValueCollection<T>,
     i: usize,
 }
 
-impl<'m> Iterator for Iter<'m> {
-    type Item = &'m RsValueMapEntry;
+impl<'m, T> Iterator for Iter<'m, T> {
+    type Item = &'m T;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.i < self.map.cap as usize {
@@ -270,7 +258,66 @@ impl<'m> Iterator for Iter<'m> {
     }
 }
 
-impl ExactSizeIterator for Iter<'_> {}
+impl<T> ExactSizeIterator for Iter<'_, T> {}
+
+#[repr(transparent)]
+#[derive(Clone)]
+pub struct RsValueArray(RsValueCollection<SharedRsValue>);
+
+impl RsValueArray {
+    /// # Safety
+    /// See [`RsValueCollection::reserve_uninit`].
+    pub unsafe fn reserve_uninit(cap: u32) -> Self {
+        // Safety: see [`RsValueCollection::reserve_uninit`]
+        Self(unsafe { RsValueCollection::reserve_uninit(cap) })
+    }
+
+    pub fn inner_mut(&mut self) -> &mut RsValueCollection<SharedRsValue> {
+        &mut self.0
+    }
+
+    pub fn inner(&self) -> &RsValueCollection<SharedRsValue> {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RsValueArray {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone)]
+pub struct RsValueMap(RsValueCollection<RsValueMapEntry>);
+
+impl RsValueMap {
+    /// # Safety
+    /// See [`RsValueCollection::reserve_uninit`].
+    pub unsafe fn reserve_uninit(cap: u32) -> Self {
+        // Safety: see [`RsValueCollection::reserve_uninit`]
+        Self(unsafe { RsValueCollection::reserve_uninit(cap) })
+    }
+
+    pub fn inner_mut(&mut self) -> &mut RsValueCollection<RsValueMapEntry> {
+        &mut self.0
+    }
+
+    pub fn inner(&self) -> &RsValueCollection<RsValueMapEntry> {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RsValueMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map_fmt = f.debug_map();
+        for e in self.0.iter() {
+            map_fmt.key(&e.key);
+            map_fmt.value(&e.value);
+        }
+        map_fmt.finish()
+    }
+}
 
 /// A single entry of a [`RsValueMap`].
 #[repr(C)]
@@ -282,22 +329,22 @@ pub struct RsValueMapEntry {
 
 impl RsValueMapEntry {
     const SIZE: usize = std::mem::size_of::<Self>();
+
+    pub fn new(key: SharedRsValue, value: SharedRsValue) -> Self {
+        Self { key, value }
+    }
 }
 
 impl fmt::Debug for RsValueMapEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RsValueMapEntry")
-            .field("key", &self.key)
-            .field("value", &self.value)
-            .finish()
+        f.debug_set().entry(&self.key).entry(&self.value).finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        map::{RsValueMap, RsValueMapEntry},
-        shared::SharedRsValue,
+        collection::{RsValueCollection, RsValueMap, RsValueMapEntry}, shared::SharedRsValue, Value
     };
 
     #[test]
@@ -307,14 +354,16 @@ mod tests {
             let value = SharedRsValue::number((2 * i) as f64);
             RsValueMapEntry { key, value }
         });
-        let map = RsValueMap::collect_from_exact_size_iterator(items);
+        let map = RsValueCollection::collect_from_exact_size_iterator(items);
         map.iter().for_each(|_entry| {});
+        let map = RsValueMap(map);
+        println!("{map:#?}");
     }
 
     #[test]
     fn test_empty_map_create_iter_destroy() {
         let items = std::iter::empty();
-        let map = RsValueMap::collect_from_exact_size_iterator(items);
+        let map = RsValueCollection::<RsValueMapEntry>::collect_from_exact_size_iterator(items);
         map.iter()
             .for_each(|_entry| panic!("Iterating over an empty map is impossible"));
     }
@@ -329,7 +378,8 @@ mod tests {
             let value = SharedRsValue::number((2 * i) as f64);
             RsValueMapEntry { key, value }
         });
-        let map = RsValueMap::collect_from_exact_size_iterator(items);
+        let map = RsValueCollection::collect_from_exact_size_iterator(items);
+        
         std::thread::spawn({
             let map_ref = &map;
             || {

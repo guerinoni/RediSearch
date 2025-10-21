@@ -1,4 +1,5 @@
 /// The header of a LowMemoryThinVec.
+/// cbindgen:rename=
 #[repr(C)]
 pub struct Header {
     len: SizeType,

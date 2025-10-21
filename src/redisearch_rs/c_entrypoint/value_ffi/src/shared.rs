@@ -7,23 +7,40 @@
  * GNU Affero General Public License v3 (AGPLv3).
 */
 
-use std::{
-    ffi::{c_char, c_double},
-    ptr::NonNull,
-};
+use std::{ffi::c_char, ptr::NonNull, slice};
 
 use libc::strlen;
 use redis_module::RedisModuleString;
-use value::{RsValueInternal, map::RsValueMap, shared::SharedRsValue};
+use value::{
+    Value,
+    collection::{RsValueArray, RsValueMap},
+    shared::SharedRsValue,
+    strings::RsValueString,
+};
 
 /// Creates a heap-allocated `RsValue` wrapping a string.
 /// Doesn't duplicate the string. Use strdup if the value needs to be detached.
 /// @param str The string to wrap (ownership is transferred)
 /// @param len The length of the string
 /// @return A pointer to a heap-allocated RsValue
+///
+/// # Safety
+/// - `str` must point to a valid, NULL-terminated C string with a length of at most `u32::MAX` bytes.
+/// - `str` must not be aliased.
+///
 #[unsafe(no_mangle)]
-pub extern "C" fn SharedRsValue_NewString(str: Option<NonNull<c_char>>, len: u32) -> SharedRsValue {
-    todo!()
+pub unsafe extern "C" fn SharedRsValue_NewString(
+    str: Option<NonNull<c_char>>,
+    len: u32,
+) -> SharedRsValue {
+    let str = unsafe { debug_unwrap!(str) };
+    // unsafe { SharedRsValue::malloc_string(str, len) }
+
+    let s = unsafe { RsValueString::copy_from_c_chars(str.as_ptr(), len) };
+
+    let s = unsafe { debug_unwrap!(s, "error creating RsValueString") };
+
+    SharedRsValue::string(s)
 }
 
 /**
@@ -32,29 +49,26 @@ pub extern "C" fn SharedRsValue_NewString(str: Option<NonNull<c_char>>, len: u32
  * # Safety
  *
  * - `str` must point to a valid, NULL-terminated C string with a length of at most `u32::MAX` bytes.
+ * - `str` must not be aliased.
  *
  * @param str The null-terminated string to wrap (ownership is transferred)
  * @return A pointer to a heap-allocated RSValue
  */
-pub unsafe extern "C" fn RSValue_NewCString(str: Option<NonNull<c_char>>) -> SharedRsValue {
-    debug_assert!(str.is_some(), "str cannot be NULL");
+pub unsafe extern "C" fn SharedRsValue_NewCString(str: Option<NonNull<c_char>>) -> SharedRsValue {
+    // Safety:
+    // Caller must ensure `str` is a valid pointer to a C string.
+    let str = unsafe { debug_unwrap!(str) };
+
     let len = {
-        // Safety:
-        // Caller must ensure `str` is a valid pointer to a C string.
-        let str = unsafe { str.unwrap_unchecked() };
         // Safety:
         // Caller must ensure `str` is a NULL-terminated C string
         unsafe { strlen(str.as_ptr()) }
     };
 
-    #[cfg(debug_assertions)]
-    let len = len
-        .try_into()
-        .expect("Length of str cannot be more than u32::MAX");
-    #[cfg(not(debug_assertions))]
-    let len = unsafe { len.try_into().unwrap_unchecked() };
+    let len =
+        unsafe { debug_unwrap!(len.try_into(), "Length of str cannot be more than u32::MAX") };
 
-    SharedRsValue_NewString(str, len)
+    unsafe { SharedRsValue_NewString(Some(str), len) }
 }
 
 /// Creates a heap-allocated `RsValue` wrapping a const string.
@@ -67,9 +81,31 @@ pub unsafe extern "C" fn RSValue_NewCString(str: Option<NonNull<c_char>>) -> Sha
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SharedRsValue_NewConstString(
     str: *const c_char,
-    len: usize,
+    len: u32,
 ) -> SharedRsValue {
-    todo!()
+    // unsafe { SharedRsValue::const_string(str, len) }
+    unsafe { SharedRsValue_NewString(NonNull::new(str as *mut c_char), len) }
+}
+
+///
+/// # Safety
+/// - `str` must be a valid pointer to a [`RedisModuleString`]
+/// - The [`RedisModuleString`] `str` points to must be valid UTF-8
+pub unsafe extern "C" fn SharedRsValue_NewCopiedRedisString(
+    str: *const RedisModuleString,
+) -> SharedRsValue {
+    debug_assert!(!str.is_null(), "`str` must not be NULL");
+
+    // Note: `from_ptr` is erroneously not marked unsafe,
+    // but it does not validate whether it points to a valid
+    // [`RedisModuleString`]
+    let str = redis_module::RedisString::from_ptr(str);
+    // Safety:
+    // Caller is required to ensure the RedisModule string is valid UTF-8.
+    let str = unsafe { debug_unwrap!(str, "passed string was not UTF-8") };
+    let str = RsValueString::copy_from_str(str);
+    let str = unsafe { debug_unwrap!(str, "failed to create RsValueString") };
+    SharedRsValue::string(str)
 }
 
 /// Creates a heap-allocated `RsValue` wrapping a RedisModuleString.
@@ -79,10 +115,11 @@ pub unsafe extern "C" fn SharedRsValue_NewConstString(
 /// @param str The RedisModuleString to wrap
 /// @return A pointer to a heap-allocated RsValue
 #[unsafe(no_mangle)]
-pub extern "C" fn SharedRsValue_NewBorrowedRedisString(
+pub unsafe extern "C" fn SharedRsValue_NewBorrowedRedisString(
     str: *const RedisModuleString,
 ) -> SharedRsValue {
-    todo!()
+    // unsafe { SharedRsValue::borrowed_redis_string(str) }
+    unsafe { SharedRsValue_NewCopiedRedisString(str) }
 }
 
 /// Creates a heap-allocated `RsValue` which increments and owns a reference to the Redis string.
@@ -90,8 +127,11 @@ pub extern "C" fn SharedRsValue_NewBorrowedRedisString(
 /// @param str The RedisModuleString to wrap (refcount is incremented)
 /// @return A pointer to a heap-allocated RsValue
 #[unsafe(no_mangle)]
-pub extern "C" fn SharedRsValue_NewOwnedRedisString(str: *mut RedisModuleString) -> SharedRsValue {
-    todo!()
+pub unsafe extern "C" fn SharedRsValue_NewOwnedRedisString(
+    str: *const RedisModuleString,
+) -> SharedRsValue {
+    // unsafe { SharedRsValue::retain_owned_redis_string(str) }
+    unsafe { SharedRsValue_NewCopiedRedisString(str) }
 }
 
 /// Creates a heap-allocated `RsValue` which steals a reference to the Redis string.
@@ -99,8 +139,12 @@ pub extern "C" fn SharedRsValue_NewOwnedRedisString(str: *mut RedisModuleString)
 /// @param s The RedisModuleString to wrap (ownership is transferred)
 /// @return A pointer to a heap-allocated RsValue
 #[unsafe(no_mangle)]
-pub extern "C" fn SharedRsValue_NewStolenRedisString(str: *mut RedisModuleString) -> SharedRsValue {
-    todo!()
+pub unsafe extern "C" fn SharedRsValue_NewStolenRedisString(
+    str: Option<NonNull<RedisModuleString>>,
+) -> SharedRsValue {
+    let str = unsafe { debug_unwrap!(str) };
+    // unsafe { SharedRsValue::take_owned_redis_string(str) }
+    unsafe { SharedRsValue_NewCopiedRedisString(str.as_ptr() as *const _) }
 }
 
 /// Creates a heap-allocated `RsValue` with a copied string.
@@ -115,10 +159,12 @@ pub extern "C" fn SharedRsValue_NewStolenRedisString(str: *mut RedisModuleString
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SharedRsValue_NewCopiedString(
     str: *const c_char,
-    len: usize,
+    len: u32,
 ) -> SharedRsValue {
-    debug_assert!(!str.is_null(), "pointer `str` was NULL");
-    todo!()
+    // unsafe { SharedRsValue::copy_malloc_string(str, len) }
+    let str = unsafe { RsValueString::copy_from_c_chars(str, len) };
+    let str = unsafe { debug_unwrap!(str, "failed to create RsValueString") };
+    SharedRsValue::string(str)
 }
 
 /// Creates a heap-allocated `RsValue` by parsing a string as a number.
@@ -129,13 +175,24 @@ pub unsafe extern "C" fn SharedRsValue_NewCopiedString(
 ///
 /// @param p The string to parse
 /// @param l The length of the string
-/// @return A pointer to a heap-allocated `RsValue` or NULL on parse failure
+/// @return A pointer to a heap-allocated `RsValue`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SharedRsValue_NewParsedNumber(
     str: *const c_char,
     len: usize,
 ) -> SharedRsValue {
-    todo!()
+    if len == 0 {
+        return SharedRsValue::undefined();
+    }
+
+    let str = unsafe { std::slice::from_raw_parts(str as *const u8, len) };
+    let Ok(str) = std::str::from_utf8(str) else {
+        return SharedRsValue::undefined();
+    };
+    let Ok(n) = str.parse() else {
+        return SharedRsValue::undefined();
+    };
+    SharedRsValue::number(n)
 }
 
 /// Creates a heap-allocated `RsValue` containing a number.
@@ -143,15 +200,16 @@ pub unsafe extern "C" fn SharedRsValue_NewParsedNumber(
 /// @return A pointer to a heap-allocated `RsValue` of type `RsValueType_Number`
 #[unsafe(no_mangle)]
 pub extern "C" fn SharedRsValue_NewNumber(n: f64) -> SharedRsValue {
-    todo!()
+    SharedRsValue::number(n)
 }
 
 /// Creates a heap-allocated `RsValue` containing a number from an int64.
+/// This operation casts the passed `i64` to an `f64`, possibly losing information.
 /// @param ii The int64 value to convert and wrap
 /// @return A pointer to a heap-allocated `RsValue` of type `RsValueType_Number`
 #[unsafe(no_mangle)]
 pub extern "C" fn SharedRsValue_NewNumberFromInt64(dd: i64) -> SharedRsValue {
-    todo!()
+    SharedRsValue::number(dd as f64)
 }
 
 /// Creates a heap-allocated `RsValue` array from existing values.
@@ -160,7 +218,17 @@ pub extern "C" fn SharedRsValue_NewNumberFromInt64(dd: i64) -> SharedRsValue {
 /// @param len Number of values
 /// @return A pointer to a heap-allocated `RsValue` of type `RsValueType_Array`
 #[unsafe(no_mangle)]
-pub extern "C" fn SharedRsValue_NewArray(vals: *mut SharedRsValue, len: u32) -> SharedRsValue {
+pub unsafe extern "C" fn SharedRsValue_NewArray(
+    vals: Option<NonNull<SharedRsValue>>,
+    len: u32,
+) -> SharedRsValue {
+    let vals = if len == 0 {
+        &[]
+    } else {
+        let vals = unsafe { debug_unwrap!(vals) };
+        unsafe { slice::from_raw_parts(vals.as_ptr(), len as usize) }
+    };
+
     todo!()
 }
 
@@ -170,7 +238,7 @@ pub extern "C" fn SharedRsValue_NewArray(vals: *mut SharedRsValue, len: u32) -> 
 /// @return A pointer to a heap-allocated RsValue of type RsValueType_Map
 #[unsafe(no_mangle)]
 pub extern "C" fn SharedRsValue_NewMap(map: RsValueMap) -> SharedRsValue {
-    todo!()
+    SharedRsValue::map(map)
 }
 
 /// Creates a heap-allocated RsValue array from NULL terminated C strings.
@@ -178,8 +246,25 @@ pub extern "C" fn SharedRsValue_NewMap(map: RsValueMap) -> SharedRsValue {
 /// @param sz Number of strings in the array
 /// @return A pointer to a heap-allocated RsValue array
 #[unsafe(no_mangle)]
-pub extern "C" fn SharedRsValue_NewStringArray(strs: *mut *mut c_char, sz: u32) -> SharedRsValue {
-    todo!()
+pub unsafe extern "C" fn SharedRsValue_NewStringArray(
+    strs: Option<NonNull<Option<NonNull<c_char>>>>,
+    sz: u32,
+) -> SharedRsValue {
+    let strs = if sz == 0 {
+        &[]
+    } else {
+        let strs = unsafe { debug_unwrap!(strs) };
+        unsafe { std::slice::from_raw_parts(strs.as_ptr(), sz as usize) }
+    };
+    let mut array = unsafe { RsValueArray::reserve_uninit(sz) };
+
+    strs.iter()
+        .copied()
+        .map(|str| unsafe { SharedRsValue_NewCString(str) })
+        .enumerate()
+        .for_each(|(i, v)| unsafe { array.inner_mut().write_entry(v, i as u32) });
+
+    SharedRsValue::array(array)
 }
 
 /// Creates a heap-allocated RsValue array from NULL terminated C string constants.
@@ -206,5 +291,10 @@ pub extern "C" fn SharedRsValue_NewTrio(
     middle: SharedRsValue,
     right: SharedRsValue,
 ) -> SharedRsValue {
-    todo!()
+    SharedRsValue::trio(left, middle, right)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SharedRsValue_Number_Get(v: &SharedRsValue) -> f64 {
+    unsafe { debug_unwrap!(v.get_number(), "v should be of type 'Number'") }
 }

@@ -17,16 +17,34 @@ typedef enum RsValueType {
   RsValueType_Undefined,
   RsValueType_Null,
   RsValueType_Number,
+  RsValueType_MallocString,
+  RsValueType_ConstString,
+  RsValueType_OwnedRedisString,
+  RsValueType_BorrowedRedisString,
+  RsValueType_String,
   RsValueType_Sds,
+  RsValueType_Array,
   RsValueType_Ref,
   RsValueType_Trio,
   RsValueType_Map,
 } RsValueType;
 
+typedef struct RsValueStringData RsValueStringData;
+
 /**
  * Tuple struct holding 3 [`SharedRsValue`] items.
  */
 typedef struct RsValueTrioData RsValueTrioData;
+
+typedef struct OwnedRmAllocString {
+  char *str;
+  uint32_t len;
+} OwnedRmAllocString;
+
+typedef struct ConstString {
+  const char *str;
+  uint32_t len;
+} ConstString;
 
 /**
  * Rust wrapper around [`sds`]
@@ -45,6 +63,18 @@ typedef struct RsValueTrioData RsValueTrioData;
  */
 typedef sds OwnedSds;
 
+typedef RedisModuleString *OwnedRedisString;
+
+typedef const RedisModuleString *RedisStringRef;
+
+/**
+ * A string type optimized for use in [`crate::RsValueInternal`].
+ *
+ */
+typedef struct RsValueString {
+  struct RsValueStringData *s;
+} RsValueString;
+
 /**
  * A heap-allocated and refcounted RedisSearch dynamic value.
  * This type is backed by [`Arc<RsValueInternal>`], but uses
@@ -54,7 +84,7 @@ typedef sds OwnedSds;
  * - If this pointer is non-NULL, it was obtained from `Arc::into_raw`.
  * - If it is NULL, it represents an undefined value.
  * - A non-null pointer represents one clone of said `Arc`, and as such, as
- *   long as the [`SharedRsValue] lives and holds a non-null pointer, the Arc
+ *   long as the [`SharedRsValue`] lives and holds a non-null pointer, the Arc
  *   is still valid.
  */
 typedef struct SharedRsValue {
@@ -63,6 +93,29 @@ typedef struct SharedRsValue {
    */
   const struct RsValueInternal *ptr;
 } SharedRsValue;
+
+/**
+ * An immutable structure that holds and manages a set of
+ * heap-allocated key-value pairs, i.e. [`RsValueMapEntry`] items.
+ *
+ * # Invariants
+ * - Can hold at most [`Self::MAX_CAPACITY`] entries, which on 32-bit systems
+ *   is less than `u32::MAX`. The reason for this is that when doing pointer
+ *   addition, we must ensure we don't overflow `isize::MAX`.
+ *   See [`NonNull::add`].
+ */
+typedef struct RsValueCollection_SharedRsValue {
+  /**
+   * Pointer to a heap-allocated array of `Self::cap` [`RsValueMapEntry`] items.
+   */
+  struct SharedRsValue *entries;
+  /**
+   * The number of [`RsValueMapEntry`] items this map can hold
+   */
+  uint32_t cap;
+} RsValueCollection_SharedRsValue;
+
+typedef struct RsValueCollection_SharedRsValue RsValueArray;
 
 /**
  * A container for the [`RsValueInternal::Trio`](crate::RsValueInternal::Trio)
@@ -90,7 +143,7 @@ typedef struct RsValueMapEntry {
  *   addition, we must ensure we don't overflow `isize::MAX`.
  *   See [`NonNull::add`].
  */
-typedef struct RsValueMap {
+typedef struct RsValueCollection_RsValueMapEntry {
   /**
    * Pointer to a heap-allocated array of `Self::cap` [`RsValueMapEntry`] items.
    */
@@ -99,7 +152,9 @@ typedef struct RsValueMap {
    * The number of [`RsValueMapEntry`] items this map can hold
    */
   uint32_t cap;
-} RsValueMap;
+} RsValueCollection_RsValueMapEntry;
+
+typedef struct RsValueCollection_RsValueMapEntry RsValueMap;
 
 /**
  * Internal storage of [`RsValue`] and [`SharedRsValue`]
@@ -108,27 +163,42 @@ typedef enum RsValueInternal_Tag {
   /**
    * Null value
    */
-  Null,
+  RsValueInternal_Null,
   /**
    * Numeric value
    */
-  Number,
+  RsValueInternal_Number,
+  /**
+   * String value backed by a rm_alloc'd string
+   */
+  RsValueInternal_MallocString,
+  RsValueInternal_ConstString,
   /**
    * Owned SDS value
    */
-  Sds,
+  RsValueInternal_Sds,
+  RsValueInternal_OwnedRedisString,
+  RsValueInternal_BorrowedRedisString,
+  /**
+   * String value
+   */
+  RsValueInternal_String,
+  /**
+   * Array value
+   */
+  RsValueInternal_Array,
   /**
    * Reference value
    */
-  Ref,
+  RsValueInternal_Ref,
   /**
    * Trio value
    */
-  Trio,
+  RsValueInternal_Trio,
   /**
    * Map value
    */
-  Map,
+  RsValueInternal_Map,
 } RsValueInternal_Tag;
 
 typedef struct RsValueInternal {
@@ -138,7 +208,25 @@ typedef struct RsValueInternal {
       double number;
     };
     struct {
+      struct OwnedRmAllocString malloc_string;
+    };
+    struct {
+      struct ConstString const_string;
+    };
+    struct {
       OwnedSds sds;
+    };
+    struct {
+      OwnedRedisString owned_redis_string;
+    };
+    struct {
+      RedisStringRef borrowed_redis_string;
+    };
+    struct {
+      struct RsValueString string;
+    };
+    struct {
+      RsValueArray array;
     };
     struct {
       struct SharedRsValue ref;
@@ -147,7 +235,7 @@ typedef struct RsValueInternal {
       struct RsValueTrio trio;
     };
     struct {
-      struct RsValueMap map;
+      RsValueMap map;
     };
   };
 } RsValueInternal;
@@ -201,6 +289,7 @@ struct RsValue RsValue_Number(double n);
  * - The passed string pointer must point to a valid C string that
  *   was allocated using `rm_malloc`
  * - The passed length must match the length to the string.
+ * - The passed string pointer must not be aliased.
  *
  * @param str The malloc'd string to wrap (ownership is transferred)
  * @param len The length of the string
@@ -229,7 +318,7 @@ enum RsValueType RsValue_Type(const struct RsValue *v);
  * @param cap the number of entries (key and value) of capacity the map needs to get
  * @returns an uninitialized `RsValueMap` of `cap` capacity.
  */
-struct RsValueMap RsValueMap_AllocUninit(uint32_t cap);
+RsValueMap RsValueMap_AllocUninit(uint32_t cap);
 
 /**
  * Set a key-value pair at a specific index in the map.
@@ -245,10 +334,14 @@ struct RsValueMap RsValueMap_AllocUninit(uint32_t cap);
  * @param key The key RSValue (ownership is transferred to the map)
  * @param value The value RSValue (ownership is transferred to the map)
  */
-void RsValueMap_SetEntry(struct RsValueMap *map,
+void RsValueMap_SetEntry(RsValueMap *map,
                          size_t i,
                          struct SharedRsValue key,
                          struct SharedRsValue value);
+
+RsValueArray RsValueArray_AllocUninit(uint32_t cap);
+
+void RsValueArray_SetEntry(RsValueArray *arr, size_t i, struct SharedRsValue value);
 
 /**
  * Creates a heap-allocated `RsValue` wrapping a string.
@@ -256,8 +349,14 @@ void RsValueMap_SetEntry(struct RsValueMap *map,
  * @param str The string to wrap (ownership is transferred)
  * @param len The length of the string
  * @return A pointer to a heap-allocated RsValue
+ *
+ * # Safety
+ * - `str` must point to a valid, NULL-terminated C string with a length of at most `u32::MAX` bytes.
+ * - `str` must not be aliased.
+ *
  */
-struct SharedRsValue SharedRsValue_NewString(char *str, uint32_t len);
+struct SharedRsValue SharedRsValue_NewString(char *str,
+                                             uint32_t len);
 
 /**
  * Creates a heap-allocated `RsValue` wrapping a const string.
@@ -268,7 +367,7 @@ struct SharedRsValue SharedRsValue_NewString(char *str, uint32_t len);
  * @param str The null-terminated string to wrap (ownership is transferred)
  * @return A pointer to a heap-allocated RsValue wrapping a constant C string
  */
-struct SharedRsValue SharedRsValue_NewConstString(const char *str, uintptr_t len);
+struct SharedRsValue SharedRsValue_NewConstString(const char *str, uint32_t len);
 
 /**
  * Creates a heap-allocated `RsValue` wrapping a RedisModuleString.
@@ -286,7 +385,7 @@ struct SharedRsValue SharedRsValue_NewBorrowedRedisString(const RedisModuleStrin
  * @param str The RedisModuleString to wrap (refcount is incremented)
  * @return A pointer to a heap-allocated RsValue
  */
-struct SharedRsValue SharedRsValue_NewOwnedRedisString(RedisModuleString *str);
+struct SharedRsValue SharedRsValue_NewOwnedRedisString(const RedisModuleString *str);
 
 /**
  * Creates a heap-allocated `RsValue` which steals a reference to the Redis string.
@@ -307,7 +406,7 @@ struct SharedRsValue SharedRsValue_NewStolenRedisString(RedisModuleString *str);
  * @param dst The length of the string to copy
  * @return A pointer to a heap-allocated `RsValue` owning the copied string
  */
-struct SharedRsValue SharedRsValue_NewCopiedString(const char *str, uintptr_t len);
+struct SharedRsValue SharedRsValue_NewCopiedString(const char *str, uint32_t len);
 
 /**
  * Creates a heap-allocated `RsValue` by parsing a string as a number.
@@ -318,7 +417,7 @@ struct SharedRsValue SharedRsValue_NewCopiedString(const char *str, uintptr_t le
  *
  * @param p The string to parse
  * @param l The length of the string
- * @return A pointer to a heap-allocated `RsValue` or NULL on parse failure
+ * @return A pointer to a heap-allocated `RsValue`
  */
 struct SharedRsValue SharedRsValue_NewParsedNumber(const char *str, uintptr_t len);
 
@@ -331,6 +430,7 @@ struct SharedRsValue SharedRsValue_NewNumber(double n);
 
 /**
  * Creates a heap-allocated `RsValue` containing a number from an int64.
+ * This operation casts the passed `i64` to an `f64`, possibly losing information.
  * @param ii The int64 value to convert and wrap
  * @return A pointer to a heap-allocated `RsValue` of type `RsValueType_Number`
  */
@@ -351,7 +451,7 @@ struct SharedRsValue SharedRsValue_NewArray(struct SharedRsValue *vals, uint32_t
  * @param map The RsValueMap to wrap (ownership is transferred)
  * @return A pointer to a heap-allocated RsValue of type RsValueType_Map
  */
-struct SharedRsValue SharedRsValue_NewMap(struct RsValueMap map);
+struct SharedRsValue SharedRsValue_NewMap(RsValueMap map);
 
 /**
  * Creates a heap-allocated RsValue array from NULL terminated C strings.
@@ -380,6 +480,8 @@ struct SharedRsValue SharedRsValue_NewConstStringArray(const char **strs, uint32
 struct SharedRsValue SharedRsValue_NewTrio(struct SharedRsValue left,
                                            struct SharedRsValue middle,
                                            struct SharedRsValue right);
+
+double SharedRsValue_Number_Get(const struct SharedRsValue *v);
 
 #ifdef __cplusplus
 }  // extern "C"
