@@ -3232,6 +3232,7 @@ int DistAggregateCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc
     // No need to hold the GIL since we are not in a background thread
     if (estimateOOM(ctx)) {
       RedisModule_Log(ctx, "notice", "Not enough memory available to execute the query");
+      QueryErrorsGlobalStats_UpdateError(QUERY_EOOM, 1);
       return RedisModule_ReplyWithError(ctx, QueryError_Strerror(QUERY_EOOM));
     }
   }
@@ -3264,6 +3265,17 @@ int DistHybridCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   } else if (argc < 3) {
     return RedisModule_WrongArity(ctx);
   }
+
+      if (RSGlobalConfig.requestConfigParams.oomPolicy != OomPolicy_Ignore) {
+      // OOM guardrail
+      if (estimateOOM(ctx)) {
+        RedisModule_Log(ctx, "notice", "Not enough memory available to execute the query");
+        QueryError_SetCode(&status, QUERY_EOOM);
+        // Cleanup
+        DistHybridCleanups(ctx, cmdCtx, NULL, NULL, NULL, reply, &status);
+        return;
+      }
+    }
 
   // Coord callback
   ConcurrentCmdHandler dist_callback = RSExecDistHybrid;
@@ -3609,6 +3621,7 @@ int DistSearchCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     // No need to hold the GIL since we are not in a background thread
     if (estimateOOM(ctx)) {
       RedisModule_Log(ctx, "notice", "Not enough memory available to execute the query");
+      QueryErrorsGlobalStats_UpdateError(QUERY_EOOM, 1);
       return RedisModule_ReplyWithError(ctx, QueryError_Strerror(QUERY_EOOM));
     }
   }
