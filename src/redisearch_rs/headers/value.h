@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "redismodule.h"
+// Required to ensure that the alignment declared by cbindgen is respected on
+// the C/C++ side.
+#define ALIGNED(n) __attribute__((aligned(n)))
+
 
 /**
  * Enumeration of the types an
@@ -22,9 +26,23 @@ typedef enum RsValueType {
 } RsValueType;
 
 /**
- * Tuple struct holding 3 [`SharedRsValue`] items.
+ * Internal storage of [`RsValue`] and [`SharedRsValue`]
  */
-typedef struct RsValueTrioData RsValueTrioData;
+typedef struct RsValueInternal RsValueInternal;
+
+/**
+ * A type with size `N`.
+ */
+typedef uint8_t Size_24[24];
+
+/**
+ * Opaque variat of [`RsValue`], allowing the
+ * non-FFI-safe [`RsValue`] to be passed to C
+ * and even allow C land to place it on the stack.
+ */
+typedef struct ALIGNED(8) OpaqueRsValue {
+  Size_24 _0;
+} OpaqueRsValue;
 
 /**
  * A heap-allocated and refcounted RedisSearch dynamic value.
@@ -44,14 +62,6 @@ typedef struct SharedRsValue {
    */
   const struct RsValueInternal *ptr;
 } SharedRsValue;
-
-/**
- * A container for the [`RsValueInternal::Trio`](crate::RsValueInternal::Trio)
- * variant.
- */
-typedef struct RsValueTrio {
-  struct RsValueTrioData *_0;
-} RsValueTrio;
 
 /**
  * A single entry of a [`RsValueMap`].
@@ -82,73 +92,6 @@ typedef struct RsValueMap {
   uint32_t cap;
 } RsValueMap;
 
-/**
- * Internal storage of [`RsValue`] and [`SharedRsValue`]
- */
-typedef enum RsValueInternal_Tag {
-  /**
-   * Null value
-   */
-  Null,
-  /**
-   * Numeric value
-   */
-  Number,
-  /**
-   * Reference value
-   */
-  Ref,
-  /**
-   * Trio value
-   */
-  Trio,
-  /**
-   * Map value
-   */
-  Map,
-} RsValueInternal_Tag;
-
-typedef struct RsValueInternal {
-  RsValueInternal_Tag tag;
-  union {
-    struct {
-      double number;
-    };
-    struct {
-      struct SharedRsValue ref;
-    };
-    struct {
-      struct RsValueTrio trio;
-    };
-    struct {
-      struct RsValueMap map;
-    };
-  };
-} RsValueInternal;
-
-/**
- * A stack-allocated RediSearch dynamic value.
- */
-typedef enum RsValue_Tag {
-  /**
-   * Undefined, not holding a value.
-   */
-  RsValue_Undef,
-  /**
-   * Defined and holding a value.
-   */
-  RsValue_Def,
-} RsValue_Tag;
-
-typedef struct RsValue {
-  RsValue_Tag tag;
-  union {
-    struct {
-      struct RsValueInternal def;
-    };
-  };
-} RsValue;
-
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -157,7 +100,7 @@ extern "C" {
  * Creates a stack-allocated, undefined `RsValue`.
  * @returns a stack-allocated `RsValue` of type `RsValueType_Undef`
  */
-struct RsValue RsValue_Undefined(void);
+struct OpaqueRsValue RsValue_Undefined(void);
 
 /**
  * Creates a stack-allocated `RsValue` containing a number.
@@ -165,7 +108,7 @@ struct RsValue RsValue_Undefined(void);
  * @param n The numeric value to wrap
  * @return A stack-allocated `RsValue` of type `RsValueType_Number`
  */
-struct RsValue RsValue_Number(double n);
+struct OpaqueRsValue RsValue_Number(double n);
 
 /**
  * Creates a stack-allocated `RsValue` containing a malloc'd string.
@@ -180,7 +123,7 @@ struct RsValue RsValue_Number(double n);
  * @param len The length of the string
  * @return A stack-allocated `RsValue` of type `RsValueType_String` with `RSString_Malloc` subtype
  */
-struct RsValue RsValue_String(char *str, uint32_t len);
+struct OpaqueRsValue RsValue_String(char *str, uint32_t len);
 
 /**
  * Returns a pointer to a statically allocated NULL `RsValue`.
@@ -188,14 +131,14 @@ struct RsValue RsValue_String(char *str, uint32_t len);
  * DO NOT free or modify this value.
  * @return A pointer to a static `RsValue` of type `RsValueType_Null`
  */
-const struct RsValue *RsValue_NullStatic(void);
+const struct OpaqueRsValue *RsValue_NullStatic(void);
 
 /**
  * Get the type of an `RsValue`.
  * @param v The value to inspect
  * @return The `RsValueType` of the value
  */
-enum RsValueType RsValue_Type(const struct RsValue *v);
+enum RsValueType RsValue_Type(const struct OpaqueRsValue *v);
 
 /**
  * Create a new, uninitialized `RsValueMap`, reserving space for `cap`
